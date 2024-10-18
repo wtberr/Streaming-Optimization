@@ -4,55 +4,59 @@ from PIL import Image, ImageTk
 import requests
 from io import BytesIO
 from transformers import DistilBertTokenizer, DistilBertModel
-import torch
-from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
+import numpy as np
+import random
 from movies import movies
-
 
 # Load DistilBERT tokenizer and model
 tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
-model = DistilBertModel.from_pretrained('distilbert-base-uncased')
+model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
 
 # OMDb API key
 OMDB_API_KEY = 'ab4301c4'
 
 # Initialize global variables
-selected_genres = []
+selected_phrases = []
 recommended_movies = []
 ranked_movies = []
 
+# List of 20 movie descriptions
+movie_phrases = [
+    "Heartwarming family adventure", "Dark psychological thriller", "Romantic comedy drama",
+    "Intense crime mystery", "Epic fantasy saga", "Action-packed superhero film", "Mind-bending sci-fi",
+    "Gripping political drama", "Inspiring true story", "Uplifting feel-good comedy", "Emotional coming-of-age",
+    "Suspenseful detective story", "Visually stunning animation", "Dark supernatural horror",
+    "Light-hearted romantic comedy", "Gritty crime drama", "High-stakes courtroom drama",
+    "Fast-paced action thriller", "Historical war epic", "Witty satirical comedy"
+]
 
-def toggle_genre(genre, button):
-    """Toggle the genre button on and off, updating the selected_genres list."""
-    if genre in selected_genres:
-        selected_genres.remove(genre)
-        button.config(bg="SystemButtonFace")  # Reset to default color
-    else:
-        selected_genres.append(genre)
-        button.config(bg="gray")  # Darken when selected
+# Set of genres
+genres = {'Action', 'Western', 'Political Drama', 'Family', 'Music', 'Political Thriller', 'Romance',
+          'Teen Drama', 'Medical Drama', 'Sci-Fi', 'Political', 'Horror', 'Sports', 'Fantasy',
+          'Biography', 'Anime', 'Dystopian', 'Historical Drama', 'Musical', 'Animation', 'Drama',
+          'Superhero', 'Comedy', 'Mystery', 'Legal Drama', 'Anthology', 'War', 'Spy', 'Historical',
+          'Thriller', 'Adventure', 'Crime'}
 
 
-def filter_movies_by_genre(selected_genres):
-    """Filter and return movies that match the selected genres."""
-    matching_movies = {}
-    if selected_genres:
+def filter_movies_by_genre(selected_phrases, user_input):
+    """Filter and return movies that match the selected genres, and apply special handling for anime/animation."""
+    filtered_movies = {}
+
+    # If 'anime' or 'animation' is in the user input, only show those genres
+    if 'anime' in user_input.lower() or 'animation' in user_input.lower():
         for movie, details in movies.items():
-            movie_genres = details[2]  # The third element in the list is the genres list
-            if any(genre in movie_genres for genre in selected_genres):  # If there's a genre match
-                matching_movies[movie] = details
+            if 'Anime' in details[2] or 'Animation' in details[2]:
+                filtered_movies[movie] = details
     else:
-        matching_movies = movies  # If no genre is selected, return all movies
-    return matching_movies
+        filtered_movies = movies  # If no specific filter, return all movies
+
+    return filtered_movies
 
 
 def get_distilbert_embedding(text):
     """Get DistilBERT embedding for the input text."""
-    inputs = tokenizer(text, return_tensors='pt', truncation=True, padding=True, max_length=512)
-    with torch.no_grad():  # Disable gradient calculations to save memory
-        outputs = model(**inputs)
-    # Use the first token ([CLS]) for sentence-level embedding
-    cls_embedding = outputs.last_hidden_state[:, 0, :].numpy()
-    return cls_embedding
+    return model.encode(text)
 
 
 def rank_movies_by_similarity(user_input, recommended_movies):
@@ -61,11 +65,19 @@ def rank_movies_by_similarity(user_input, recommended_movies):
     ranked_movies = []
 
     for movie, details in recommended_movies.items():
-        movie_text = f"{details[0]} {details[1]}"  # Combine recommendation and synopsis
+        movie_text = f"{details[0]} {details[1]}"  # Combine title and synopsis
         movie_embedding = get_distilbert_embedding(movie_text)
 
         # Compute cosine similarity between user input and movie description
-        similarity_score = cosine_similarity(user_embedding, movie_embedding)[0][0]
+        similarity_score = np.dot(user_embedding, movie_embedding) / (
+                np.linalg.norm(user_embedding) * np.linalg.norm(movie_embedding))
+
+        # Check for genre matches and apply the 30% boost for each match
+        movie_genres = details[2]
+        for genre in genres:
+            if genre.lower() in user_input.lower() and genre in movie_genres:
+                similarity_score *= 1.3  # Apply the 30% boost for each matching genre
+
         ranked_movies.append((movie, similarity_score))
 
     # Sort movies by similarity in descending order
@@ -145,12 +157,19 @@ def close_window(event=None):
 
 def on_enter(event=None):
     """Handle the first Enter press to get recommendations and update the window."""
-    global answer, genre, recommended_movies, ranked_movies
+    global answer, recommended_movies, ranked_movies
     answer = entry.get()  # Get the text from the entry bar
-    genre = selected_genres.copy()  # Get the selected genres
 
-    # Filter movies based on selected genres
-    recommended_movies = filter_movies_by_genre(genre)
+    if not answer and selected_phrases:
+        answer = " ".join(selected_phrases)  # Concatenate the selected phrases
+
+        # If there's still no input (i.e., user didn't click any button or type anything)
+    if not answer:
+        print("No input or selections made.")
+        return  # Exit if nothing is provided to avoid processing
+
+    # Filter movies based on selected phrases and handle anime/animation filter
+    recommended_movies = filter_movies_by_genre(selected_phrases, answer)
 
     if recommended_movies:
         # Rank the recommended movies based on user input similarity
@@ -159,7 +178,15 @@ def on_enter(event=None):
         # Update the window to show top 10 recommendations
         display_recommendations()
     else:
-        print("No movies found for the selected genres.")
+        print("No movies found for the selected input.")
+
+
+def append_phrase(phrase):
+    """Append the selected phrase to the user's input in the entry field."""
+    current_text = entry.get()
+    updated_text = current_text + " " + phrase
+    entry.delete(0, tk.END)
+    entry.insert(0, updated_text)
 
 
 # Create the main window
@@ -171,7 +198,7 @@ canvas = Canvas(window)
 scrollbar = Scrollbar(window, orient="vertical", command=canvas.yview)
 canvas.configure(yscrollcommand=scrollbar.set)
 
-# Create a frame inside the canvas to hold the genre buttons and text bar
+# Create a frame inside the canvas to hold the buttons and text bar
 scrollable_frame = Frame(canvas)
 scrollable_frame.bind(
     "<Configure>",
@@ -183,27 +210,22 @@ canvas.pack(side="left", fill="both", expand=True)
 scrollbar.pack(side="right", fill="y")
 canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
 
-# Add a label at the top
+# Create the label and entry field
 label = tk.Label(scrollable_frame, text="What are you in the mood for?", font=("Arial", 14))
-label.pack(pady=10)
+label.grid(row=0, column=0, columnspan=10, pady=10)  # Span across 10 columns
 
-# Create buttons for genres
-genres = [
-    "Action", "Adult", "Adventure", "Animation", "Biography", "Comedy", "Crime",
-    "Documentary", "Drama", "Family", "Fantasy", "Film Noir", "Game Show",
-    "History", "Horror", "Musical", "Music", "Mystery", "News", "Reality-TV",
-    "Romance", "Sci-Fi", "Short", "Sport", "Talk-Show", "Thriller", "War", "Western"
-]
-
-# Add genre buttons to the scrollable frame with proper command
-for genre in genres:
-    button = tk.Button(scrollable_frame, text=genre, width=10)
-    button.config(command=lambda g=genre, b=button: toggle_genre(g, b))
-    button.pack(pady=5)
-
-# Create a text entry bar
 entry = tk.Entry(scrollable_frame, width=50)
-entry.pack(pady=10)
+entry.grid(row=1, column=0, columnspan=10, pady=10)  # Span across 10 columns
+
+# Randomly select 10 phrases from movie_phrases
+random_phrases = random.sample(movie_phrases, 10)
+
+# Create buttons for the random movie phrases
+for index, phrase in enumerate(random_phrases):
+    button = tk.Button(scrollable_frame, text=phrase, width=25, command=lambda p=phrase: append_phrase(p))
+    row = (index // 2) + 2  # Place in rows starting from row 2
+    col = index % 2  # Arrange in two columns
+    button.grid(row=row, column=col, padx=5, pady=5)  # Add padding for spacing
 
 # Bind the Enter key to the on_enter function
 entry.bind("<Return>", on_enter)
